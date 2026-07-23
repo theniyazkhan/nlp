@@ -97,13 +97,19 @@ def main():
 
     results = []
 
+    LANG_CONFIG_MAPPING = {
+        "zho_Hans": "cmn_Hans",
+        "zho_Hant": "cmn_Hant",
+    }
+
     for lang in tqdm(target_languages, desc="Evaluating languages"):
         is_latin = lang.endswith("_Latn") or (len(lang.split("_")) > 1 and lang.split("_")[1] == "Latn")
+        config_lang = LANG_CONFIG_MAPPING.get(lang, lang)
         
         try:
             tgt_dataset = load_dataset(
                 "openlanguagedata/flores_plus",
-                lang,
+                config_lang,
                 split="devtest",
                 token=hf_token
             )
