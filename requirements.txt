@@ -1,0 +1,12 @@
+datasets
+sacrebleu
+spacy
+spacy-transformers
+transformers
+sentencepiece
+torch
+pandas
+matplotlib
+tqdm
+unidecode
+pytest
