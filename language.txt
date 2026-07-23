@@ -1,0 +1,12 @@
+# High-Resource Latin
+spa_Latn fra_Latn deu_Latn por_Latn ita_Latn
+# High/Mid-Resource Non-Latin
+zho_Hans jpn_Jpan rus_Cyrl arb_Arab kor_Hang
+# South Asian
+ben_Beng hin_Deva urd_Arab tam_Taml tel_Telu mar_Deva npi_Deva
+# African / Lower-Resource
+swh_Latn yor_Latn zul_Latn hau_Latn amh_Ethi ibo_Latn
+# Southeast Asian
+vie_Latn ind_Latn tha_Thai khm_Khmr
+# Lower-Resource Varied Scripts
+sin_Sinh lao_Laoo mya_Mymr kat_Geor khk_Cyrl
