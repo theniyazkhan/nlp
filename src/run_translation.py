@@ -1,20 +1,6 @@
 """
-run_translation.py – Translate FLORES+ eng_Latn devtest with NLLB.
-Designed to run on a Kaggle T4 GPU.
-
-Usage:
-    python src/run_translation.py \\
-        --model facebook/nllb-200-distilled-600M \\
-        --languages-file languages.txt \\
-        --output-dir results/translations \\
-        --batch-size 32
-
-Arguments:
-    --model          HuggingFace model id (default: facebook/nllb-200-distilled-600M)
-    --languages-file Path to file with one NLLB language code per line
-    --output-dir     Directory for output JSONL files
-    --batch-size     Number of sentences per translation batch (default: 32)
-    --load-8bit      Load model in 8-bit quantisation (requires bitsandbytes)
+Translate FLORES+ eng_Latn devtest into target languages using NLLB models.
+Saves jsonl translations per target language, supporting batch processing and resumable execution.
 """
 
 import argparse
@@ -27,7 +13,6 @@ from pathlib import Path
 from tqdm import tqdm
 
 
-# ─────────────────────────────── CLI ────────────────────────────────────────
 def get_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Translate FLORES+ eng_Latn devtest into target languages via NLLB."
@@ -35,58 +20,50 @@ def get_args() -> argparse.Namespace:
     p.add_argument(
         "--model",
         default="facebook/nllb-200-distilled-600M",
-        help="HuggingFace model ID (default: facebook/nllb-200-distilled-600M)",
+        help="HuggingFace model ID",
     )
     p.add_argument(
         "--languages-file",
         default="languages.txt",
-        help="File with one NLLB language code per line (default: languages.txt)",
+        help="File with target language codes",
     )
     p.add_argument(
         "--output-dir",
         default="results/translations",
-        help="Output directory (default: results/translations)",
+        help="Output directory",
     )
     p.add_argument(
         "--batch-size",
         type=int,
         default=32,
-        help="Translation batch size (default: 32)",
+        help="Translation batch size",
     )
     p.add_argument(
         "--load-8bit",
         action="store_true",
-        help="Load model in 8-bit (requires bitsandbytes)",
+        help="Load model in 8-bit quantization",
     )
     return p.parse_args()
 
 
-# ─────────────────────────────── Helpers ────────────────────────────────────
 def load_sentences(hf_token: str) -> list[dict]:
-    """Load eng_Latn devtest from FLORES+, return list of {sentence_id, text}."""
     from datasets import load_dataset
     from huggingface_hub import login
 
     login(token=hf_token, add_to_git_credential=False)
-    print("Loading FLORES+ eng_Latn devtest …")
     ds = load_dataset("openlanguagedata/flores_plus", "eng_Latn", split="devtest")
-    records = [{"sentence_id": i, "text": row["text"]} for i, row in enumerate(ds)]
-    print(f"  Loaded {len(records)} sentences.")
-    return records
+    return [{"sentence_id": i, "text": row["text"]} for i, row in enumerate(ds)]
 
 
 def load_languages(path: str) -> list[str]:
-    """Read language codes from file, one per line, skip blanks."""
-    langs = [
+    return [
         line.strip()
         for line in Path(path).read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    return langs
 
 
 def count_lines(path: Path) -> int:
-    """Count non-empty lines in a file (used for resumability check)."""
     try:
         with open(path, encoding="utf-8") as f:
             return sum(1 for line in f if line.strip())
@@ -95,17 +72,14 @@ def count_lines(path: Path) -> int:
 
 
 def batched(lst: list, size: int):
-    """Yield successive slices of `lst` of length `size`."""
     for i in range(0, len(lst), size):
         yield lst[i : i + size]
 
 
 def load_model_and_tokenizer(model_id: str, load_8bit: bool):
-    """Load NLLB model + tokenizer. Returns (model, tokenizer)."""
     import torch
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, BitsAndBytesConfig
 
-    print(f"\nLoading model '{model_id}' …")
     tokenizer = AutoTokenizer.from_pretrained(model_id)
 
     if load_8bit:
@@ -121,7 +95,6 @@ def load_model_and_tokenizer(model_id: str, load_8bit: bool):
         model = model.to(device)
 
     model.eval()
-    print(f"  Model loaded (8-bit={load_8bit}).")
     return model, tokenizer
 
 
@@ -133,11 +106,10 @@ def translate_language(
     batch_size: int,
     out_path: Path,
 ) -> None:
-    """Translate all source sentences into `lang_code` and write to `out_path`."""
     import torch
 
     device = next(model.parameters()).device
-    target_lang = lang_code  # NLLB uses the flores+ codes directly
+    target_lang = lang_code
 
     with open(out_path, "w", encoding="utf-8") as fout:
         for batch in tqdm(
@@ -175,41 +147,31 @@ def translate_language(
                 fout.write(json.dumps(out_record, ensure_ascii=False) + "\n")
 
 
-# ─────────────────────────────── Main ───────────────────────────────────────
 def main() -> None:
     args = get_args()
 
-    # ── HF authentication ──────────────────────────────────────────────────
     hf_token = os.environ.get("HF_TOKEN")
     if not hf_token:
         sys.exit("ERROR: HF_TOKEN environment variable is not set.")
 
-    # ── Load sentences ─────────────────────────────────────────────────────
     source_records = load_sentences(hf_token)
     n_expected = len(source_records)
 
-    # ── Language list ──────────────────────────────────────────────────────
     languages = load_languages(args.languages_file)
-    print(f"Languages to translate: {len(languages)}")
-
-    # ── Output directory ───────────────────────────────────────────────────
     model_short = args.model.replace("/", "_")
     out_dir = Path(args.output_dir) / model_short
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Load model ─────────────────────────────────────────────────────────
     model, tokenizer = load_model_and_tokenizer(args.model, args.load_8bit)
 
-    # ── Translate ──────────────────────────────────────────────────────────
     for lang in languages:
         out_path = out_dir / f"{lang}.jsonl"
 
-        # Resumability: skip if file already has the expected number of lines
         if count_lines(out_path) == n_expected:
             print(f"[SKIP] {lang}: {out_path} already has {n_expected} lines.")
             continue
 
-        print(f"\n[TRANSLATE] {lang} → {out_path}")
+        print(f"\n[TRANSLATE] {lang} -> {out_path}")
         t0 = time.perf_counter()
         translate_language(lang, source_records, model, tokenizer, args.batch_size, out_path)
         elapsed = time.perf_counter() - t0

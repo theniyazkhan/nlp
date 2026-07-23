@@ -1,50 +1,23 @@
+"""
+Evaluates FLORES+ translation benchmark against an entities-only copy baseline.
+Extracts entity strings from English sentences and measures BLEU/chrF++ overlap against target language references.
+Supports filtering entity types into names, numeric, or all entities.
+"""
+
+import argparse
+import json
 import os
 import sys
-import json
-import argparse
+from pathlib import Path
 import pandas as pd
 import sacrebleu
 from datasets import load_dataset
 from tqdm import tqdm
 
-# NOTE: Hardcoded resource tier mapping - NEEDS HUMAN REVIEW / VALIDATION
-RESOURCE_TIERS = {
-    # High Resource
-    "spa_Latn": "high",
-    "fra_Latn": "high",
-    "deu_Latn": "high",
-    "por_Latn": "high",
-    "ita_Latn": "high",
-    "zho_Hans": "high",
-    "jpn_Jpan": "high",
-    "rus_Cyrl": "high",
-    "arb_Arab": "high",
-    "kor_Hang": "high",
-    # Mid Resource
-    "ben_Beng": "mid",
-    "hin_Deva": "mid",
-    "urd_Arab": "mid",
-    "tam_Taml": "mid",
-    "tel_Telu": "mid",
-    "mar_Deva": "mid",
-    "npi_Deva": "mid",
-    "vie_Latn": "mid",
-    "ind_Latn": "mid",
-    "tha_Thai": "mid",
-    "khm_Khmr": "mid",
-    # Low Resource
-    "swh_Latn": "low",
-    "yor_Latn": "low",
-    "zul_Latn": "low",
-    "hau_Latn": "low",
-    "amh_Ethi": "low",
-    "ibo_Latn": "low",
-    "sin_Sinh": "low",
-    "lao_Laoo": "low",
-    "mya_Mymr": "low",
-    "kat_Geor": "low",
-    "khk_Cyrl": "low",
-}
+from resource_tiers import RESOURCE_TIERS
+
+NAME_TYPES = {"PERSON", "GPE", "ORG", "LOC", "NORP", "FAC"}
+NUMERIC_TYPES = {"DATE", "CARDINAL", "ORDINAL", "TIME", "MONEY", "PERCENT", "QUANTITY"}
 
 LANG_CONFIG_MAPPING = {
     "zho_Hans": "cmn_Hans",
@@ -52,8 +25,22 @@ LANG_CONFIG_MAPPING = {
 }
 
 
+def get_args():
+    parser = argparse.ArgumentParser(description="Entities-Only Baseline Evaluation")
+    parser.add_argument("--languages-file", type=str, default="languages.txt", help="Path to languages file")
+    parser.add_argument("--entities-file", type=str, default="results/english_entities_trf.jsonl", help="Path to entities file")
+    parser.add_argument(
+        "--entity-types",
+        type=str,
+        choices=["names", "numeric", "all", "all-modes"],
+        default="names",
+        help="Entity types to extract: names, numeric, all, or all-modes (default: names)"
+    )
+    parser.add_argument("--output", type=str, default=None, help="Output CSV path")
+    return parser.parse_args()
+
+
 def load_languages(filepath="languages.txt"):
-    """Reads target languages from languages.txt."""
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"Language file not found: {filepath}")
 
@@ -66,17 +53,45 @@ def load_languages(filepath="languages.txt"):
     return languages
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Entities-Only Baseline Evaluation")
-    parser.add_argument("--languages-file", type=str, default="languages.txt", help="Path to languages file")
-    parser.add_argument("--entities-file", type=str, default="english_entities.json", help="Path to English entities JSON file")
-    parser.add_argument("--output", type=str, default="results/entities_only_baseline.csv", help="Output CSV path")
-    args = parser.parse_args()
+def load_entities(filepath: str, mode: str) -> list[list[str]]:
+    path = Path(filepath)
+    if not path.exists() and filepath == "results/english_entities_trf.jsonl":
+        fallback_path = Path("english_entities.json")
+        if fallback_path.exists():
+            print(f"[Info] {path} not found. Falling back to {fallback_path}")
+            path = fallback_path
 
-    # Read HF_TOKEN strictly from environment variable
-    hf_token = os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
-    if not hf_token:
-        # Check local .env files if environment variable is not directly exported
+    if not path.exists():
+        raise FileNotFoundError(f"Entities file not found at {filepath} or fallback location.")
+
+    entities_per_sentence = []
+
+    if path.suffix == ".jsonl":
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                ents = record.get("entities", [])
+                if mode == "names":
+                    selected = [e["text"] for e in ents if e.get("label") in NAME_TYPES]
+                elif mode == "numeric":
+                    selected = [e["text"] for e in ents if e.get("label") in NUMERIC_TYPES]
+                else:
+                    selected = [e["text"] for e in ents]
+                entities_per_sentence.append(selected)
+    else:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            for ents in data:
+                entities_per_sentence.append(ents if isinstance(ents, list) else [])
+
+    return entities_per_sentence
+
+
+def get_hf_token():
+    token = os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
+    if not token:
         for env_path in [".env", os.path.expanduser("~/.env")]:
             if os.path.exists(env_path):
                 with open(env_path, "r", encoding="utf-8") as f:
@@ -85,29 +100,21 @@ def main():
                         if line.startswith("HF_TOKEN=") or line.startswith("HUGGING_FACE_HUB_TOKEN="):
                             val = line.split("=", 1)[1].strip("\"'")
                             if val:
-                                hf_token = val
-                                break
+                                return val
+    if not token:
+        sys.exit("ERROR: HF_TOKEN environment variable is not set.")
+    return token
 
-    if not hf_token:
-        raise ValueError("HF_TOKEN environment variable is not set. Please set HF_TOKEN in environment or .env file.")
 
-    # Load English entities JSON
-    if not os.path.exists(args.entities_file):
-        raise FileNotFoundError(f"Entities file not found: {args.entities_file}")
-
-    with open(args.entities_file, "r", encoding="utf-8") as f:
-        entities_per_sentence = json.load(f)
-
-    # Build pseudo-translations containing ONLY English entity strings
+def run_evaluation(entities_file: str, mode: str, languages_file: str, output_path: str):
+    hf_token = get_hf_token()
+    entities_per_sentence = load_entities(entities_file, mode)
     pseudo_hypotheses = [" ".join(ents) if ents else "" for ents in entities_per_sentence]
-    print(f"Loaded {len(entities_per_sentence)} entity lists. Example pseudo-translation: '{pseudo_hypotheses[1]}'")
-
-    target_languages = load_languages(args.languages_file)
-    print(f"Loaded {len(target_languages)} target languages from '{args.languages_file}'.")
+    target_languages = load_languages(languages_file)
 
     results = []
 
-    for lang in tqdm(target_languages, desc="Evaluating entities-only baseline"):
+    for lang in tqdm(target_languages, desc=f"Evaluating entities-only ({mode})"):
         script = lang.split("_")[-1] if "_" in lang else "Unknown"
         resource_tier = RESOURCE_TIERS.get(lang, "unknown")
         config_lang = LANG_CONFIG_MAPPING.get(lang, lang)
@@ -123,7 +130,6 @@ def main():
             text_col = "text" if "text" in sample_item else "sentence"
             target_references = [row[text_col] for row in tgt_dataset]
 
-            # Compute BLEU and chrF++ (word_order=2)
             bleu_res = sacrebleu.corpus_bleu(pseudo_hypotheses, [target_references])
             chrf_res = sacrebleu.corpus_chrf(pseudo_hypotheses, [target_references], word_order=2)
 
@@ -136,28 +142,42 @@ def main():
             })
 
         except Exception as e:
-            print(f"\n[Warning/Failure] Failed to process language '{lang}': {e}")
+            print(f"\n[Warning] Failed to process language '{lang}': {e}")
 
-    # Ensure results/ directory exists and save CSV
-    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     df = pd.DataFrame(results)
-    df.to_csv(args.output, index=False)
-    print(f"\nSaved entities-only baseline results for {len(df)} languages to '{args.output}'.")
+    df.to_csv(output_path, index=False)
+    print(f"Saved results ({mode}) for {len(df)} languages to '{output_path}'.")
+    return df
 
-    # Print summary statistics grouped by script and by resource_tier
-    print("\n" + "="*60)
-    print("SUMMARY STATISTICS: ENTITIES-ONLY BASELINE")
-    print("="*60)
 
-    print("\n--- Averages Grouped by Script ---")
-    script_stats = df.groupby("script")[["entities_only_bleu", "entities_only_chrf"]].agg(["count", "mean"])
-    print(script_stats.to_string())
+def compare_modes(mode_dfs: dict):
+    print("\n" + "=" * 65)
+    print("COMPARISON OF CHRF++ AVERAGES ACROSS ENTITY TYPE MODES")
+    print("=" * 65)
+    print(f"{'Entity Mode':<15} {'Languages':<12} {'Mean chrF++':<15} {'Mean BLEU':<15}")
+    print("-" * 65)
+    for mode, df in mode_dfs.items():
+        mean_chrf = df["entities_only_chrf"].mean() if not df.empty else 0.0
+        mean_bleu = df["entities_only_bleu"].mean() if not df.empty else 0.0
+        print(f"{mode:<15} {len(df):<12} {mean_chrf:<15.4f} {mean_bleu:<15.4f}")
+    print("=" * 65)
 
-    print("\n--- Averages Grouped by Resource Tier ---")
-    tier_stats = df.groupby("resource_tier")[["entities_only_bleu", "entities_only_chrf"]].agg(["count", "mean"])
-    print(tier_stats.to_string())
 
-    print("="*60)
+def main():
+    args = get_args()
+    if args.entity_types == "all-modes":
+        mode_dfs = {}
+        for m in ["names", "numeric", "all"]:
+            out_file = f"results/entities_only_baseline_{m}.csv"
+            mode_dfs[m] = run_evaluation(args.entities_file, m, args.languages_file, out_file)
+        compare_modes(mode_dfs)
+    else:
+        output_file = args.output or f"results/entities_only_baseline_{args.entity_types}.csv"
+        df = run_evaluation(args.entities_file, args.entity_types, args.languages_file, output_file)
+        # Also create default results/entities_only_baseline.csv if mode is names for backwards compatibility
+        if args.entity_types == "names" and not args.output:
+            df.to_csv("results/entities_only_baseline.csv", index=False)
 
 
 if __name__ == "__main__":

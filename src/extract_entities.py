@@ -1,10 +1,6 @@
 """
-extract_entities.py
 Extract named entities from FLORES+ eng_Latn devtest using spaCy en_core_web_trf.
-Saves results/english_entities_trf.jsonl.
-Usage:
-    python src/extract_entities.py [--output results/english_entities_trf.jsonl]
-                                   [--old-entities english_entities.json]
+Saves entity records to JSONL format and optionally compares statistics against a previous extraction.
 """
 
 import argparse
@@ -20,7 +16,6 @@ from huggingface_hub import login
 from tqdm import tqdm
 
 
-# ─────────────────────────────── CLI ────────────────────────────────────────
 def get_args():
     p = argparse.ArgumentParser(description="Extract NEs from FLORES+ using spaCy trf model")
     p.add_argument("--output", default="results/english_entities_trf.jsonl",
@@ -28,29 +23,24 @@ def get_args():
     p.add_argument("--old-entities", default="english_entities.json",
                    help="Path to old english_entities.json for comparison")
     p.add_argument("--skip-if-exists", action="store_true",
-                   help="Skip extraction if output file already exists (resumable)")
+                   help="Skip extraction if output file already exists")
     return p.parse_args()
 
 
-# ─────────────────────────── Helpers ────────────────────────────────────────
 def load_hf_and_dataset():
     token = os.environ.get("HF_TOKEN")
     if not token:
         sys.exit("ERROR: HF_TOKEN environment variable is not set.")
     login(token=token, add_to_git_credential=False)
-    print("Logged in to Hugging Face.")
 
-    print("Loading FLORES+ eng_Latn devtest …")
     ds = load_dataset("openlanguagedata/flores_plus", "eng_Latn", split="devtest")
     sentences = [row["text"] for row in ds]
-    print(f"  Loaded {len(sentences)} sentences.")
     return sentences
 
 
 def print_comparison(new_records, old_entities_path):
     old_path = Path(old_entities_path)
     if not old_path.exists():
-        print(f"\n[Comparison] Old entities file not found at {old_path}; skipping comparison.")
         return
 
     with open(old_path, encoding="utf-8") as f:
@@ -76,14 +66,12 @@ def print_comparison(new_records, old_entities_path):
     print("=" * 60)
 
 
-# ─────────────────────────── Main ───────────────────────────────────────────
 def main():
     args = get_args()
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     if args.skip_if_exists and out_path.exists():
-        print(f"Output already exists at {out_path}; loading existing records for summary.")
         records = []
         label_counter = Counter()
         with open(out_path, encoding="utf-8") as f:
@@ -94,12 +82,8 @@ def main():
                     for e in rec.get("entities", []):
                         label_counter[e["label"]] += 1
     else:
-        # 1. Authenticate & load dataset
         sentences = load_hf_and_dataset()
-
-        # 2. Load spaCy trf model
         model_name = "en_core_web_trf"
-        print(f"\nLoading spaCy model '{model_name}' ...")
         try:
             nlp = spacy.load(model_name)
         except OSError:
@@ -108,8 +92,6 @@ def main():
                 f"Run:  python -m spacy download {model_name}"
             )
 
-        # 3. Extract entities
-        print("Extracting entities ...")
         records = []
         label_counter = Counter()
 
@@ -128,13 +110,11 @@ def main():
                 label_counter[e["label"]] += 1
             records.append({"sentence_id": sent_id, "text": sentence, "entities": ents})
 
-        # 4. Save JSONL
         with open(out_path, "w", encoding="utf-8") as f:
             for rec in records:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         print(f"\nSaved {len(records)} records -> {out_path}")
 
-    # 5. Print summary
     total = sum(len(r["entities"]) for r in records)
     n = len(records)
     empty = sum(1 for r in records if len(r["entities"]) == 0)
@@ -150,7 +130,6 @@ def main():
         print(f"    {label:<15} {count:>6,}")
     print("=" * 60)
 
-    # 6. Comparison against old model
     print_comparison(records, args.old_entities)
 
 
